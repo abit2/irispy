@@ -92,8 +92,6 @@ version = package.__version__.split('-', 1)[0]
 # The full version, including alpha/beta/rc tags.
 release = package.__version__
 
-extensions.remove('astropy_helpers.extern.numpydoc')
-extensions.append('sphinx.ext.napoleon')
 
 # -- Options for HTML output --------------------------------------------------
 
@@ -115,18 +113,17 @@ extensions.append('sphinx.ext.napoleon')
 #html_theme = None
 
 try:
-    from sunpy_sphinx_theme.conf import *
-
-    html_sidebars = {'**': ['docsidebar.html']}
-    html_theme_options = {
-        'navbar_links': [
-            ("Documentation", "index"),
-        ],
-        'logo_url': 'http://sunpy.org'
-    }
-
+    import sphinx_rtd_theme
+    html_theme = 'sphinx_rtd_theme'
+    html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 except ImportError:
     html_theme = 'default'
+
+
+
+html_theme = "sphinx_rtd_theme"
+
+
 
 # Custom sidebar templates, maps document names to template names.
 #html_sidebars = {}
