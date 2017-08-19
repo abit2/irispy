@@ -1,22 +1,49 @@
 # -*- coding: utf-8 -*-
 # Author: Daniel Ryan <ryand5@tcd.ie>
 
-from astropy.units.quantity import Quantity
-from astropy.table import Table
-from astropy.io import fits
-from sunpycube.cube.datacube import Cube, CubeSequence
-from sunpycube.wcs_util import WCS
 
+from astropy.table import Table
+from collections import namedtuple
+from astropy.io import fits
+from ndcube import NDCubeSequence, NDCube
+from ndcube import cube_utils as cu
+from ndcube.wcs_util import WCS
+
+import astropy.units as u
 import copy
 from datetime import timedelta
+
 import numpy as np
+import astropy.units as u
+from astropy.io import fits
+from astropy.table import Table
 from sunpy.time import parse_time
 
-__all__ = ['IRISSpectrograph']
+SequenceDimensionPair = namedtuple('SequenceDimensionPair', 'shape axis_types')
+
+__all__ = ['IRISSpectrograph', 'SpectrogramSequence']
 
 
 class IRISSpectrograph(object):
-    """An object to hold data from multiple IRIS raster scans."""
+    """
+    An object to hold data from multiple IRIS raster scans.
+
+    The Interface Region Imaging Spectrograph (IRIS) small explorer spacecraft
+    provides simultaneous spectra and images of the photosphere, chromosphere,
+    transition region, and corona with 0.33 to 0.4 arcsec spatial resolution,
+    2-second temporal resolution and 1 km/s velocity resolution over a
+    field-of- view of up to 175 arcsec by 175 arcsec.  IRIS consists of a 19-cm
+    UV telescope that feeds a slit-based dual-bandpass imaging spectrograph.
+
+    IRIS was launched into a Sun-synchronous orbit on 27 June 2013.
+
+    References
+    ----------
+    * `IRIS Mission Page <http://iris.lmsal.com>`_
+    * `IRIS Analysis Guide <https://iris.lmsal.com/itn26/itn26.pdf>`_
+    * `IRIS Instrument Paper <https://www.lmsal.com/iris_science/doc?cmd=dcur&proj_num=IS0196&file_type=pdf>`_
+    * `IRIS FITS Header keywords <https://www.lmsal.com/iris_science/doc?cmd=dcur&proj_num=IS0077&file_type=pdf>`_
+    """
 
     def __init__(self, filenames, spectral_windows="All", common_axis=0):
         """Initializes an IRISSpectrograph object from IRIS level 2 files."""
@@ -26,6 +53,7 @@ class IRISSpectrograph(object):
         raster_index_to_file = []
         for f, filename in enumerate(filenames):
             hdulist = fits.open(filename)
+            hdulist.verify('fix')
             if f == 0:
                 # collecting the window observations.
                 windows_in_obs = np.array([hdulist[0].header["TDESC{0}".format(i)]
@@ -50,11 +78,11 @@ class IRISSpectrograph(object):
                 self.spectral_windows = Table([
                     [hdulist[0].header["TDESC{0}".format(i)] for i in window_fits_indices],
                     [hdulist[0].header["TDET{0}".format(i)] for i in window_fits_indices],
-                    Quantity([hdulist[0].header["TWAVE{0}".format(i)]
-                              for i in window_fits_indices], unit="angstrom"),
-                    Quantity([hdulist[0].header["TWMIN{0}".format(i)]
-                              for i in window_fits_indices], unit="angstrom"),
-                    Quantity([hdulist[0].header["TWMAX{0}".format(i)] for i in window_fits_indices], unit="angstrom")],
+                    u.Quantity([hdulist[0].header["TWAVE{0}".format(i)]
+                                for i in window_fits_indices], unit="angstrom"),
+                    u.Quantity([hdulist[0].header["TWMIN{0}".format(i)]
+                                for i in window_fits_indices], unit="angstrom"),
+                    u.Quantity([hdulist[0].header["TWMAX{0}".format(i)] for i in window_fits_indices], unit="angstrom")],
                     names=("name", "detector type", "brightest wavelength", "min wavelength", "max wavelength"))
                 # Set spectral window name as table index.
                 self.spectral_windows.add_index("name")
@@ -70,9 +98,9 @@ class IRISSpectrograph(object):
                 data_nan_masked = copy.deepcopy(hdulist[window_fits_indices[i]].data)
                 data_nan_masked[hdulist[window_fits_indices[i]].data == -200.] = np.nan
                 data_mask = hdulist[window_fits_indices[i]].data == -200.
-                # appending Cube instance to the corresponding window key in dictionary's list.
+                # appending NDCube instance to the corresponding window key in dictionary's list.
                 data_dict[window_name].append(
-                    Cube(data_nan_masked, wcs_, meta=self.meta, mask=data_mask))
+                    NDCube(data_nan_masked, wcs=wcs_, meta=dict(self.meta), mask=data_mask))
 
             scan_label = "scan{0}".format(f)
             # Append to list representing the scan labels of each
@@ -116,9 +144,9 @@ class IRISSpectrograph(object):
         # Attach dictionary containing level 1 and wcs info for each file used.
         # Calculate measurement time of each spectrum.
         times = np.array([parse_time(self.meta["STARTOBS"])+timedelta(seconds=s)
-                 for s in self.auxiliary_data["TIME"]])
-        # making a CubeSequence of every dictionary key window.
-        self.data = dict([(window_name, CubeSequence(data_dict[window_name], meta=self.meta, common_axis=common_axis, time=times))
+                          for s in self.auxiliary_data["TIME"]])
+        # making a NDCubeSequence of every dictionary key window.
+        self.data = dict([(window_name, NDCubeSequence(data_dict[window_name], meta=self.meta, common_axis=common_axis, time=times))
                           for window_name in self.spectral_windows['name']])
 
     def __repr__(self):
@@ -126,7 +154,7 @@ class IRISSpectrograph(object):
         spectral_windows_info = "".join(
             ["\n    {0}\n        (raster axis, slit axis, spectral axis) {1}".format(
                 name,
-                self.data[name].shape[1])
+                self.data[name].dimensions[1::])
                 for name in self.spectral_windows["name"]])
         return "<iris.IRISSpectrograph instance\nOBS ID: {0}\n".format(self.meta["OBSID"]) + \
                "OBS Description: {0}\n".format(self.meta["OBS_DESC"]) + \
@@ -135,6 +163,10 @@ class IRISSpectrograph(object):
                                                       self.data[spectral_window].time[-1]) + \
                "Number unique raster positions: {0}\n".format(self.meta["NRASTERP"]) + \
                "Spectral windows{0}>".format(spectral_windows_info)
+
+    # A tuple giving coordinate names of axes in NDCubeSequences
+    coord_names = ("raster number", "x", "y", "wavelength")
+    coord_names_index_as_cube = ("exposure number", "y", "wavelength")
 
 
 def _enter_column_into_table_as_quantity(header_property_name, header, header_colnames, data, unit):
@@ -145,4 +177,78 @@ def _enter_column_into_table_as_quantity(header_property_name, header, header_co
     else:
         raise ValueError("Multiple property names equal to {0}".format(header_property_name))
     pop_colname = header_colnames.pop(index)
-    return Quantity(data[:, header[pop_colname]], unit=unit)
+    return u.Quantity(data[:, header[pop_colname]], unit=unit)
+
+
+class SpectrogramSequence(NDCubeSequence):
+    """docstring for SpectrogramSequence"""
+
+    def __init__(self, data_list, common_axis, raster_positions_per_scan, first_exposure_raster_position, meta=None, **kwargs):
+        self.time = kwargs.get('time', None)
+        self.raster_positions_per_scan = raster_positions_per_scan
+        self.first_exposure_raster_position = first_exposure_raster_position
+        super(SpectrogramSequence, self).__init__(
+            data_list, meta=meta, common_axis=common_axis, **kwargs)
+
+    def __getitem__(self, item):
+        if item is None or (isinstance(item, tuple) and None in item):
+            raise IndexError("None indices not supported")
+        # need to slice the time here
+        return self.index_as_cube[item]
+
+    @property
+    def index_by_raster(self):
+        return _IndexByRasterSlicer(self)
+
+    @property
+    def dimensions(self):
+        return SequenceDimensionPair(shape=tuple([len(self.data)*self.data[0].dimensions.shape[0]]+list(self.data[0].dimensions.shape[1::])),
+                                     axis_types=tuple(self.data[0].dimensions.axis_types))
+
+    def axes_to_world(self, origin=0):
+        list_arg = []
+        indexed_not_as_one = []
+        result = []
+        quantity_index = 0
+        missing_axis = self.data[0].missing_axis
+        wcs = self.data[0].wcs
+        shape = self.data[0].data.shape
+        for i, _ in enumerate(missing_axis):
+            # the cases where the wcs dimension was made 1 and the missing_axis is True
+            if missing_axis[wcs.naxis-1-i]:
+                list_arg.append(wcs.wcs.crpix[wcs.naxis-1-i]-1+origin)
+            else:
+                # else it is not the case where the dimension of wcs is 1.
+                list_arg.append(shape[quantity_index])
+                quantity_index += 1
+            # appending all the indexes to be returned in the answer
+                indexed_not_as_one.append(wcs.naxis-1-i)
+        list_arguemnts = list_arg[::-1]
+        pixel_to_world = wcs.all_pix2world(*list_arguemnts, origin)
+        # collecting all the needed answer in this list.
+        for index in indexed_not_as_one[::-1]:
+            result.append(u.Quantity(pixel_to_world[index], unit=wcs.wcs.cunit[index]))
+        return result[::-1]
+
+
+class _IndexByRasterSlicer(object):
+    """
+    Helper class to make slicing in index_as_cube more pythonic.
+    Helps to make operations like in numpy array.
+    >>> data_list = numpy.array(range(10))
+    >>> data_list[3:5]
+    >>> [4, 5, 6]
+    This makes slicing like this possible for index_as_cube.
+
+    Attributes
+    ----------
+    seq : `ndcube.ndcube.NDCubeSequence`
+        Object of NDCubeSequence.
+    """
+
+    def __init__(self, seq):
+        self.seq = seq
+
+    def __getitem__(self, item):
+        # slice time here
+        return cu.get_cube_from_sequence(self.seq, item)
